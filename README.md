@@ -250,7 +250,9 @@ A paired significance test (McNemar's test on same-trial correct/incorrect outco
 | 12 | 60 | 100.0% | 78.3% | -21.7% | <0.001* | [-31.7%, -11.7%] |
 | 16 | 60 | 96.7% | 86.7% | -10.0% | 0.070 | [-20.0%, -1.7%] |
 | 32 | 60 | 93.3% | 95.0% | +1.7% | 1.000 | [-5.0%, +10.0%] |
-| 48 | 60 | 94.6% | 94.6% | +0.0% | 1.000 | [-10.8%, +10.8%] |
+| 48 | 37 | 94.6% | 94.6% | +0.0% | 1.000 | [-10.8%, +10.8%] |
+
+currently 48 n_cycles was at 37 because of limited compute headroom to finish the job - will do 60 in a later update
 
 *p < 0.05, McNemar's test with continuity correction.
 
