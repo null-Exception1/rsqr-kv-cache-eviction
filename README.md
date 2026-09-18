@@ -82,7 +82,7 @@ for i in range(10):
 ```
 
 **Caveats on this follow-up sweep — most since resolved, see §5:**
-Whether the floor traces to `P` magnitude, `evict_n` magnitude, or target position specifically is answered in §5.7 (it's `evict_n`, not `P`, not target position). Whether this diff range actually moves attention scores is answered in §5.6 (it doesn't, at the tested scale — invisible past softmax). Two gaps remain genuinely open: **only float32 was tested** (production dtypes bf16/fp16 remain unchecked — no longer planned as a priority given fp32 is the target dtype for this mechanism, but worth flagging for anyone deploying at lower precision), and **content was synthetic** (`torch.randn`), not real forward-pass activations (§5.new's real-model recall run provides softer corroboration on this front, but doesn't directly re-measure the tensor-level diff on real activations).
+Whether the floor traces to `P` magnitude, `evict_n` magnitude, or target position specifically is answered in §5.7 (it's `evict_n`, not `P`, not target position). Whether this diff range actually moves attention scores is answered in §5.6 (it doesn't, at the tested scale — invisible past softmax). Two gaps remain genuinely open: **only float32 was tested** (production dtypes bf16/fp16 remain unchecked — no longer planned as a priority given fp32 is the target dtype for this mechanism, but worth flagging for anyone deploying at lower precision), and **content was synthetic** (`torch.randn`), not real forward-pass activations (§5.8's real-model recall run provides softer corroboration on this front, but doesn't directly re-measure the tensor-level diff on real activations).
 
 
 ---
@@ -210,7 +210,7 @@ implement a survivor cap — not fixed here, only measured.
 
 ### 5.4 Raw-shadow-copy memory accounting — CLOSED, not a bottleneck
 
-Direct arithmetic plus a real CUDA allocation check (matched exactly, 1.00x): raw shadow copies cost 24KB per survivor (all layers, K+V, fp32 — note this stores raw V alongside raw K for implementation simplicity, even though V is never rotated by RoPE and a K-only design would halve this). Total cost stays under 1MB at 32 concurrent survivors, under 6MB even at 256. Memory was never the binding constraint at any tested scale — the earlier concern that motivated this question (unbounded survivor growth) turned out to matter for accuracy risk, not memory pressure, and a survivor cap has been implemented as a precaution (see 5.new below).
+Direct arithmetic plus a real CUDA allocation check (matched exactly, 1.00x): raw shadow copies cost 24KB per survivor (all layers, K+V, fp32 — note this stores raw V alongside raw K for implementation simplicity, even though V is never rotated by RoPE and a K-only design would halve this). Total cost stays under 1MB at 32 concurrent survivors, under 6MB even at 256. Memory was never the binding constraint at any tested scale — the earlier concern that motivated this question (unbounded survivor growth) turned out to matter for accuracy risk, not memory pressure, and a survivor cap has been implemented as a precaution (see 5.8 below).
 
 ### 5.5 Precompute-ahead saturation point — CLOSED, negative
 
@@ -224,7 +224,7 @@ Real K/Q tensors, softmax against 6 distractors, 10 trials at the worst measured
 
 Full P×evict_n grid (0-450, step 50, 5 draws/cell, fp32): the error floor is driven by **evict_n magnitude specifically**, not by P and not by target position (P−evict_n) — confirmed by cases where identical |target position| values produce wildly different error magnitudes depending on the P/evict_n split, and evict_n=0 always producing exactly zero error regardless of P.
 
-### 5.new — Real-model recall accuracy: no measurable gap vs. corrected, once three implementation bugs were fixed
+### 5.8 — Real-model recall accuracy: no measurable gap vs. corrected, once three implementation bugs were fixed
 
 Beyond the 7 original questions, a real per-layer implementation (Qwen2.5-0.5B-Instruct, fp32, manual forward pass) was built to test RSQR's actual recall accuracy against two baselines (continuous re-rotation, leave-gap) on a multi-fact needle-in-haystack task.
 
