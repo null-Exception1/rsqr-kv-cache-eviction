@@ -236,27 +236,35 @@ Real K/Q tensors, softmax against 6 distractors, 10 trials at the worst measured
 
 Full P×evict_n grid (0-450, step 50, 5 draws/cell, fp32): the error floor is driven by **evict_n magnitude specifically**, not by P and not by target position (P−evict_n) — confirmed by cases where identical |target position| values produce wildly different error magnitudes depending on the P/evict_n split, and evict_n=0 always producing exactly zero error regardless of P.
 
-### 5.new — Real-model recall accuracy: RSQR trails corrected at low eviction counts, converges by n_cycles≈32
+### 5.new — Real-model recall accuracy: no measurable gap vs. corrected, once three implementation bugs were fixed
 
-Beyond the 7 original questions, a real per-layer implementation (Qwen2.5-0.5B-Instruct, fp32, manual forward pass) was built to test RSQR's actual recall accuracy against two baselines (continuous re-rotation, leave-gap) on a multi-fact needle-in-haystack task. RSQR clearly and consistently beats leave-gap at every tested point. Its relationship to continuous re-rotation ("corrected") is more specific than "a small bounded gap," and is worth stating precisely:
+Beyond the 7 original questions, a real per-layer implementation (Qwen2.5-0.5B-Instruct, fp32, manual forward pass) was built to test RSQR's actual recall accuracy against two baselines (continuous re-rotation, leave-gap) on a multi-fact needle-in-haystack task.
 
-A paired significance test (McNemar's test on same-trial correct/incorrect outcomes, n=60 exercised trials per `n_cycles` point, plus a paired bootstrap 95% CI on the accuracy difference) shows RSQR trails corrected by a **statistically significant** margin at low eviction counts (`n_cycles` 2, 4, 6, 12 — all p < 0.05, bootstrap CIs excluding zero), the gap narrows and becomes borderline at `n_cycles`=16 (p=0.07), and by `n_cycles`=32 the gap is **statistically indistinguishable from zero** (+1.7%, p=1.00, bootstrap 95% CI [-5.0%, +10.0%]).
+**An earlier version of this section reported a real, statistically significant accuracy gap between RSQR and corrected re-rotation at low eviction counts, closing by `n_cycles`≈32.** That result has been retracted. It was an artifact of three implementation bugs in the harness, not a property of the mechanism. In the interest of an honest record, all three are documented here rather than silently corrected:
 
-| n_cycles | n (exercised) | B corrected (acc) | C RSQR (acc) | diff | McNemar p | Bootstrap 95% CI |
+1. **Position-collision bug.** `logical_pos` was doing double duty as both the model's absolute position counter and the eviction-compaction shift amount, so it went flat across repeated evictions — multiple distinct tokens were silently assigned the *same* RoPE position. Fixed by separating `true_pos` (monotonic, used for every model step) from `logical_pos` (derived, used only for survivor rotation targets).
+2. **Duplication bug.** A flagged survivor's raw K/V was added to the active survivor store *immediately at flag time*, while the same token also remained normally present in the sliding window until its later, natural eviction — up to ~`window_size` steps afterward. For that entire span, the same token contributed to attention twice: once via its real window entry, once via a duplicate survivor entry. Fixed by holding captured raw K/V inert (`pending`) until the token's window copy is actually evicted, at which point exactly one representation becomes active — never both at once.
+3. **Anchoring bug.** Once survivor logical positions were correctly rank-compacted to close gaps between survivors (closing an earlier, separate bug), they were anchored at an isolated zero-based numbering (`0, 1, 2, ...`), disconnected from the window's own coordinate system. Since window tokens are deliberately never touched — they keep their real, unshifted `true_pos` — a survivor numbered near 0 sitting immediately next to a window token numbered in the hundreds produced a badly wrong relative distance. Fixed by anchoring survivor logical positions so the numbering ends exactly at `window_start_true_pos − 1`, recomputed fresh every step as the window slides, so survivors and the window share one consistent coordinate system.
+
+None of these three bugs touch the core single-hop-rotation design (§3.2): a survivor's raw K is still rotated at most once, directly from raw to its (now correctly computed) target position, never as a correction-on-correction. These were harness bugs in *how the target position was chosen and when a survivor became active*, not a reappearance of the compounding-drift failure mode from §2.
+
+**Re-run against the fixed implementation**, same task, same n=60 (3 seeds × 20 magic numbers) per `n_cycles` point:
+
+| n_cycles | n | B corrected | B uncorrected | C RSQR | RSQR vs. corrected | RSQR vs. uncorrected |
 |---:|---:|---:|---:|---:|---:|---:|
-| 2  | 60 | 93.3% | 80.0% | -13.3% | 0.039* | [-25.0%, -3.3%] |
-| 4  | 60 | 93.3% | 70.0% | -23.3% | 0.001* | [-36.7%, -11.7%] |
-| 6  | 60 | 91.7% | 73.3% | -18.3% | 0.007* | [-30.0%, -6.7%] |
-| 12 | 60 | 100.0% | 78.3% | -21.7% | <0.001* | [-31.7%, -11.7%] |
-| 16 | 60 | 96.7% | 86.7% | -10.0% | 0.070 | [-20.0%, -1.7%] |
-| 32 | 60 | 93.3% | 95.0% | +1.7% | 1.000 | [-5.0%, +10.0%] |
-| 48 | 37 | 94.6% | 94.6% | +0.0% | 1.000 | [-10.8%, +10.8%] |
+| 2  | 60 | 93.3%  | 93.3% | 95.0% | +1.7% | +1.7% |
+| 4  | 60 | 93.3%  | 61.7% | 93.3% | +0.0% | +31.7% |
+| 6  | 60 | 91.7%  | 53.3% | 91.7% | +0.0% | +38.3% |
+| 12 | 60 | 100.0% | 28.3% | 96.7% | -3.3% | +68.3% |
+| 16 | 60 | 96.7%  | 35.0% | 93.3% | -3.3% | +58.3% |
+| 32 | 60 | 93.3%  | 18.3% | 96.7% | +3.3% | +78.3% |
+| 48 | 60 | 93.3%  | 6.7%  | 95.0% | +1.7% | +88.3% |
 
-currently 48 n_cycles was at 37 because of limited compute headroom to finish the job - will do 60 in a later update
+McNemar's test on RSQR vs. corrected shows no significant difference at any tested `n_cycles` (all p ≥ 0.375; full test detail in the accompanying trial logs). RSQR tracks corrected within a few points at every point, with no dip at low eviction counts and no discernible trend across the range.
 
-*p < 0.05, McNemar's test with continuity correction.
+**Reading this honestly:** the three-way comparison is the actual headline result. Uncorrected collapses hard and fast as eviction cycles accumulate — from parity at `n_cycles`=2 down to 6.7% by `n_cycles`=48 — concretely demonstrating why re-rotation matters at all once RoPE positions go stale. RSQR matches corrected's accuracy at every tested point while paying `O(1)` amortized rotation cost per survivor instead of corrected's `O(window_size)` per eviction. There is no accuracy tax for taking the cheaper path, at least at this task's scale and this model.
 
-**Reading this honestly:** RSQR is not yet a demonstrated drop-in replacement for continuous re-rotation across the board — at low eviction counts it measurably underperforms it. What the data does support is a specific convergence claim: as eviction pressure increases, RSQR's accuracy deficit shrinks and disappears by `n_cycles`≈32, and stays closed at `n_cycles`=48 (exact parity, 94.6% vs 94.6%, p=1.0). Two consecutive non-significant points at 32 and 48, both with CIs comfortably straddling zero, make it unlikely that the 32 result was a fluke — this looks like a genuine convergence trend rather than noise at one point.
+**What this doesn't establish:** this is one task (multi-fact needle-in-haystack), one model (Qwen2.5-0.5B-Instruct), one hardware setup (CPU, fp32).
 
 Full per-trial logprob detail (all three strategies) is retained in the accompanying trial log for anyone who wants to dig into the confidence margins beyond raw accuracy.
 
