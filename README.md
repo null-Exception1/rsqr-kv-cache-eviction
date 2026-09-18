@@ -132,7 +132,7 @@ The motivation is kernel-launch overhead specifically, not compute cost. A GPU k
 - Lower aggregate rotation-op count than continuous per-step rotation: `O(1)` amortized per survivor token (one rotation, at window-exit) vs. `O(window_size)` per decode step for continuous rotation.
 
 **Explicitly not solved, and not claimed as solved:**
-- Tail latency vs. continuous rotation. Aggregate compute reduction does not imply lower or even comparable tail latency — this was the open concern; **isolated-rotation-cost measurement now supports the win** (§5.1): batched rotation beat continuous rotation 3.7-4.6x across stream lengths and 1.78-7.00x across eviction-severity settings, with no cliff found at any tested configuration. This is not yet an end-to-end inference-latency measurement (real model, attention, scheduler) — the isolated-cost result is a strong signal, not a final one. Candidate mitigations remain relevant for the end-to-end follow-up if it surfaces a real problem the isolated test didn't capture: fusing the boundary rotation into an existing kernel launch (e.g. the attention or cache-write kernel) rather than a dedicated launch, so it inherits the "negligible overhead" behavior reported for fused per-step RoPE (FlashInfer) rather than the overhead-bound risk of small standalone kernels; amortizing the known survivor set over the last few steps before a boundary rather than rotating all of it in one step, since survivors are known in advance (§3.2 step 2); precomputing corrections ahead of the eviction event specifically to reach kernel-launch saturation sooner (§3.4, tested and found not to help in its lookahead-queue form — §5.5); and capping batch size via the Δ/window-size ratio (§5.2, tested — no cliff found) so the worst case stays bounded.
+- Tail latency vs. continuous rotation. Aggregate compute reduction does not imply lower or even comparable tail latency — this was the open concern; **isolated-rotation-cost measurement now supports the win, with one caveat** (§5.1, §5.2): batched rotation beat continuous rotation 3.7-4.6x across stream lengths, with the advantage growing (not flat) as stream length increases. Across eviction-severity settings the advantage held broadly (1.69-6.37x) but was not monotonic — a real dip appeared at the largest tested `evict_every`, so this should be read as "consistently favorable" rather than "cliff-free by construction." A separate `survivor_delta` sweep, independent of eviction frequency, found no cliff. This is not yet an end-to-end inference-latency measurement (real model, attention, scheduler) — the isolated-cost result is a strong signal, not a final one. Candidate mitigations remain relevant for the end-to-end follow-up if it surfaces a real problem the isolated test didn't capture: fusing the boundary rotation into an existing kernel launch (e.g. the attention or cache-write kernel) rather than a dedicated launch, so it inherits the "negligible overhead" behavior reported for fused per-step RoPE (FlashInfer) rather than the overhead-bound risk of small standalone kernels; amortizing the known survivor set over the last few steps before a boundary rather than rotating all of it in one step, since survivors are known in advance (§3.2 step 2); precomputing corrections ahead of the eviction event specifically to reach kernel-launch saturation sooner (§3.4, tested and found not to help in its lookahead-queue form — §5.5); and capping batch size via the Δ/window-size ratio (§5.2 — the `survivor_delta` axis showed no cliff, though it also runs on uncapped survivor accumulation, an open issue in its own right) so the worst case stays bounded.
 - Bump severity is expected to scale with survivor density per eviction event and inversely with window size — smaller windows mean more frequent boundary crossings, which could raise bump frequency enough to erode or reverse the aggregate-compute advantage. Flagged as a real risk, not yet quantified.
 - Raw-shadow-copy memory overhead: bounded (only flagged survivors carry a shadow copy, not the whole window), but not yet accounted for numerically.
 
@@ -152,69 +152,57 @@ The 7 open questions this RFC originally posed are now answered. Full experiment
 
 ### 5.1 Latency — CLOSED, positive
 
-Two dummy-tensor microbenchmarks (isolated rotation cost, T4, fp32):
+Two dummy-tensor microbenchmarks (isolated rotation cost, T4, fp32).
 
-- **Batched vs. continuous, across stream length** (n_steps 100→5000): RSQR beats continuous per-step rotation by 3.7-4.6x, tracking rotation call count (~8x fewer calls) rather than total tokens rotated — consistent with RAP (arXiv 2602.02599)'s finding that RoPE itself is under 1% of inference latency, so the win is architectural (fewer kernel launches), not computational.
-- **Bump severity, across eviction frequency** (`evict_every` 2→64): speedup climbs *monotonically* from 1.78x to 7.00x as eviction events get rarer/bigger — the advantage doesn't erode under more frequent evictions, it grows as they get less frequent. A separate sweep varying survivor count alone (`survivor_delta` 2→64, eviction frequency held fixed) found no cliff or systematic degradation either, just run-to-run measurement noise consistent with shared Colab hardware.
+**A previous version of this section reported speedups from a harness with a real bug in it, since fixed and retracted here.** The original Arm A (continuous per-step rotation) was gated to rotate on the *same cadence* as Arm B (eviction-boundary only) — so it wasn't actually testing "every step" against "only at eviction," it was comparing two batched arms with different payload sizes. The tell: A's and B's rotation-call counts were identical at every `n_steps` value, which should never happen if one arm is genuinely continuous. Fixed by making Arm A re-rotate the entire current window on every single step, matching the literal "continuous" claim — its call count now scales with `n_steps` directly, while Arm B's scales with `n_steps / evict_every`, a real structural difference instead of an artifact of matched gating.
+
+- **Batched vs. continuous, across stream length** (n_steps 100→5000, re-run against the fixed harness): RSQR beats continuous per-step rotation by 3.7-4.6x, and — newly visible now that Arm A is genuinely continuous — **the speedup grows as stream length increases** (3.71x → 4.58x), rather than staying flat. Call-count ratio holds steady at ~8x throughout, consistent with RAP (arXiv 2602.02599)'s finding that RoPE itself is under 1% of inference latency — the win tracks kernel-launch count, not total tokens rotated.
 
 ```text
-n_steps=  100 | A:   28.065ms (calls=  93, tokens=  2550) | B:    7.683ms (calls=  12, tokens=   624) | speedup=3.65x
-n_steps=  500 | A:   95.234ms (calls= 493, tokens= 13550) | B:   25.932ms (calls=  62, tokens= 15624) | speedup=3.67x
-n_steps= 1000 | A:  215.492ms (calls= 993, tokens= 27304) | B:   49.574ms (calls= 125, tokens= 63000) | speedup=4.35x
-n_steps= 5000 | A: 1028.762ms (calls=4993, tokens=137304) | B:  289.254ms (calls= 625, tokens=1565000) | speedup=3.56x
+n_steps=  100 | A:   18.260ms (calls=  93, tokens=  2550) | B:    4.918ms (calls=  12, tokens=   624) | speedup=3.71x
+n_steps=  500 | A:   96.594ms (calls= 493, tokens= 13550) | B:   24.875ms (calls=  62, tokens= 15624) | speedup=3.88x
+n_steps= 1000 | A:  225.015ms (calls= 993, tokens= 27304) | B:   54.257ms (calls= 125, tokens= 63000) | speedup=4.15x
+n_steps= 5000 | A: 1244.572ms (calls=4993, tokens=137304) | B:  271.469ms (calls= 625, tokens=1565000) | speedup=4.58x
 ```
 
 **The one caveat that applies to everything in §5.1 and §3.5's latency discussion below: this is an isolated rotation-cost microbenchmark, not end-to-end inference latency.** It excludes real model/attention/scheduler overhead and hasn't been tested with CUDA graph capture (§5.5) or on hardware beyond a single T4. The mechanism-level conclusion (batching reduces kernel-launch count, and that reduction dominates) is well-supported; the specific multipliers above are a rotation-only measurement and should not be cited as an inference-serving speedup number without that follow-up.
 
-### 5.2 Bump severity vs. window size/Δ — CLOSED (folded into 5.1 above)
+### 5.2 Bump severity vs. window size/Δ — CLOSED, mixed
 
-Answered as part of the latency work: no evidence of a severity- or Δ-driven latency cliff across either tested axis.
+Re-run against the same fixed harness as §5.1 (Arm A now genuinely continuous, not gated to Arm B's cadence). Two sweeps, both at `n_steps=2000`:
 
 ```text
-evict_every=  2  A=422.713ms  B=258.143ms  speedup=1.64x  calls A/B=1997/999
-evict_every=  4  A=374.126ms  B=163.893ms  speedup=2.28x  calls A/B=1993/499
-evict_every=  8  A=422.879ms  B=98.663ms  speedup=4.29x  calls A/B=1985/249
-evict_every= 16  A=405.768ms  B=72.580ms  speedup=5.59x  calls A/B=1969/124
-evict_every= 32  A=384.146ms  B=59.916ms  speedup=6.41x  calls A/B=1937/61
-evict_every= 64  A=357.595ms  B=53.006ms  speedup=6.75x  calls A/B=1873/30
+evict_every=  2  A=619.958ms  B=366.444ms  speedup=1.69x  calls A/B=1997/999
+evict_every=  4  A=506.412ms  B=199.871ms  speedup=2.53x  calls A/B=1993/499
+evict_every=  8  A=451.388ms  B=171.642ms  speedup=2.63x  calls A/B=1985/249
+evict_every= 16  A=483.766ms  B=91.771ms  speedup=5.27x  calls A/B=1969/124
+evict_every= 32  A=478.224ms  B=75.017ms  speedup=6.37x  calls A/B=1937/61
+evict_every= 64  A=424.865ms  B=80.054ms  speedup=5.31x  calls A/B=1873/30
 
-======================================================================
-Sweep 1 summary -- does speedup hold as bump frequency/severity changes?
-======================================================================
-  speedup range: 1.64x - 6.75x
-  monotonic trend: non-decreasing (speedup holds or grows as evict_every increases)
+Sweep 1 summary: speedup range 1.69x-6.37x. NOT monotonic — dips at
+evict_every=64 relative to evict_every=32, rather than continuing to
+climb. Direction of the effect (rarer evictions favor RSQR) still
+holds broadly, but "climbs monotonically" is not an accurate
+description of this data and the earlier version of this section was
+wrong to claim it.
 
-survivor_delta=  2  A=390.113ms  B=100.552ms  speedup=3.88x  B_tokens_rotated=62250
-survivor_delta=  4  A=424.307ms  B=100.821ms  speedup=4.21x  B_tokens_rotated=124500
-survivor_delta=  8  A=418.649ms  B=99.305ms  speedup=4.22x  B_tokens_rotated=249000
-survivor_delta= 16  A=383.645ms  B=105.507ms  speedup=3.64x  B_tokens_rotated=249000
-survivor_delta= 32  A=371.634ms  B=120.736ms  speedup=3.08x  B_tokens_rotated=249000
-survivor_delta= 64  A=412.074ms  B=98.804ms  speedup=4.17x  B_tokens_rotated=249000
+survivor_delta=  2  A=493.068ms  B=126.545ms  speedup=3.90x  B_tokens_rotated=498
+survivor_delta=  4  A=503.230ms  B=127.219ms  speedup=3.96x  B_tokens_rotated=996
+survivor_delta=  8  A=477.551ms  B=130.473ms  speedup=3.66x  B_tokens_rotated=1992
+survivor_delta= 16  A=487.400ms  B=128.346ms  speedup=3.80x  B_tokens_rotated=1992
+survivor_delta= 32  A=446.827ms  B=151.586ms  speedup=2.95x  B_tokens_rotated=1992
+survivor_delta= 64  A=491.774ms  B=129.282ms  speedup=3.80x  B_tokens_rotated=1992
 
-======================================================================
-Sweep 2 summary -- does more survivor accumulation erode RSQR's speedup?
-======================================================================
-  speedup range: 3.08x - 4.22x
-
-======================================================================
-SANITY CHECK -- do the two arms actually differ in call count?
-======================================================================
-  n_steps=  100: OK -- A made 93 calls, B made 12 calls (7.8x more calls in A)
-  n_steps=  500: OK -- A made 493 calls, B made 62 calls (8.0x more calls in A)
-  n_steps= 1000: OK -- A made 993 calls, B made 125 calls (7.9x more calls in A)
-  n_steps= 5000: OK -- A made 4993 calls, B made 625 calls (8.0x more calls in A)
-
-======================================================================
-SUMMARY -- does the RSQR-vs-continuous speedup grow, shrink, or
-stay flat as stream length (n_steps) increases?
-======================================================================
-  n_steps=  100: RSQR (Arm B) faster, 3.65x  (A calls=93, B calls=12)
-  n_steps=  500: RSQR (Arm B) faster, 3.67x  (A calls=493, B calls=62)
-  n_steps= 1000: RSQR (Arm B) faster, 4.35x  (A calls=993, B calls=125)
-  n_steps= 5000: RSQR (Arm B) faster, 3.56x  (A calls=4993, B calls=625)
-
-Trend: speedup stays roughly FLAT across n_steps -- the per-call overhead difference dominates, independent of stream length.
+Sweep 2 summary: speedup range 2.95x-3.96x, no cliff. This sweep uses
+uncapped survivor accumulation — the same open issue tied to the
+accuracy-side collapse investigated separately. Speedup doesn't show
+obvious systematic degradation here, but this is flagged as a second,
+latency-side reason (independent of the accuracy motivation) to
+implement a survivor cap — not fixed here, only measured.
 ```
+
+**Reading this honestly:** the `survivor_delta` axis (sweep 2) supports the original "no cliff" conclusion. The `evict_every` axis (sweep 1) does not support the original "monotonic" conclusion — the advantage still broadly favors rarer evictions, but the trend is not clean, and should be described as such rather than smoothed over.
+
 
 ### 5.3 Drift-scaling sanity check — CLOSED
 
