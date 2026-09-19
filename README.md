@@ -1,6 +1,10 @@
 # [RFC Draft]: Raw-Survivor Storage with Query-Side Rotation for KV Cache Eviction
 
 **Status:** pre-draft / not yet posted.
+
+**Author:** null-Exception1
+**Repo:** https://github.com/null-Exception1/auto-kv-cache-eviction
+
 ---
 
 ## 0. Scope
@@ -249,7 +253,7 @@ None of these three bugs touch the core single-hop-rotation design (§3.2): a su
 
 McNemar's test on RSQR vs. corrected shows no significant difference at any tested `n_cycles` (all p ≥ 0.375; full test detail in the accompanying trial logs). RSQR tracks corrected within a few points at every point, with no dip at low eviction counts and no discernible trend across the range.
 
-**Reading this honestly:** the three-way comparison is the actual headline result. Uncorrected collapses hard and fast as eviction cycles accumulate - from parity at `n_cycles`=2 down to 6.7% by `n_cycles`=48 - concretely demonstrating why re-rotation matters at all once RoPE positions go stale. RSQR matches corrected's accuracy at every tested point while paying `O(1)` amortized rotation cost per survivor instead of corrected's `O(window_size)` per eviction. There is no accuracy tax for taking the cheaper path, at least at this task's scale and this model.
+**Reading this honestly:** the three-way comparison is the actual headline result. Uncorrected collapses hard and fast as eviction cycles accumulate - from parity at `n_cycles`=2 down to 6.7% by `n_cycles`=48 - concretely demonstrating why re-rotation matters at all once RoPE positions go stale. RSQR matches corrected's accuracy at every tested point while paying `O(1)` key-side rotation per survivor (rotated once, at window-exit, never touched again) instead of corrected's `O(window_size)` key re-rotation per eviction. That saving is offset by moving position-correction work to the query side (§3.1, §3.3) - whether that stays cheap over a long session with many accumulated survivor buckets is unmeasured, so this should be read as "no accuracy tax and a real key-side saving," not as "solved end-to-end" until the query-side cost question closes.
 
 **What this doesn't establish:** this is one task (multi-fact needle-in-haystack), one model (Qwen2.5-0.5B-Instruct), one hardware setup (CPU, fp32).
 
