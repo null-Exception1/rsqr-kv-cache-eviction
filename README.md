@@ -1,9 +1,4 @@
-# [RFC Draft]: Raw-Survivor Storage with Query-Side Rotation for KV Cache Eviction
-
-**Status:** pre-draft / not yet posted.
-
-**Author:** null-Exception1
-**Repo:** https://github.com/null-Exception1/auto-kv-cache-eviction
+# [RFC]: Raw-Survivor Storage with Query-Side Rotation for KV Cache Eviction
 
 ---
 
